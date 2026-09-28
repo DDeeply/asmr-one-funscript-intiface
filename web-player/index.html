@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Funscript Web Player - 本地音视频同步互动播放器 (含字幕支持)</title>
+    <style>
+        :root {
+            --primary: #7c4dff;
+            --primary-light: #b388ff;
+            --accent: #00e5ff;
+            --success: #4cd964;
+            --danger: #ff5252;
+            --bg-dark: #0f1015;
+            --card-bg: #181922;
+            --card-border: #282a36;
+            --text-main: #f8f9fa;
+            --text-muted: #8e9297;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        /* 顶部状态栏 */
+        header {
+            background: rgba(24, 25, 34, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--card-border);
+            padding: 10px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 700;
+            font-size: 16px;
+            color: var(--primary-light);
+        }
+
+        .intiface-bar {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            font-size: 13px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            font-size: 12px;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--danger);
+        }
+
+        .dot.connected {
+            background: var(--success);
+            box-shadow: 0 0 8px var(--success);
+        }
+
+        .device-info {
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        /* 主容器 */
+        main {
+            flex: 1;
+            display: flex;
+            padding: 20px;
+            gap: 20px;
+            max-width: 1440px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        /* 左侧播放视口与时间轴 */
+        .player-section {
+            flex: 3;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .screen-container {
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: 16 / 9;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--card-border);
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .audio-visualizer {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            color: var(--primary-light);
+            padding: 20px;
+        }
+
+        .audio-disc {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #333 20%, #111 21%, #111 95%, #7c4dff 100%);
+            border: 4px solid var(--card-border);
+            animation: spin 6s linear infinite paused;
+            box-shadow: 0 0 20px rgba(124, 77, 255, 0.3);
+        }
+
+        .audio-disc.playing {
+            animation-play-state: running;
+        }
+
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+
+        /* 字幕渲染层 */
+        .subtitle-overlay {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 850px;
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+            display: flex;
+            justify-content: center;
+        }
+
+        .subtitle-text {
+            display: none;
+            background: rgba(0, 0, 0, 0.78);
+            color: #ffffff;
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-size: 19px;
+            font-weight: 600;
+            line-height: 1.45;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.9);
+            border: 1px solid rgba(255,255,255,0.15);
+            max-width: 100%;
+            word-break: break-word;
+            white-space: pre-wrap;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            transition: all 0.15s ease;
+        }
+
+        /* 脚本波形图 Canvas */
+        .timeline-canvas-box {
+            background: var(--card-bg);
+            border-radius: 10px;
+            padding: 10px;
+            border: 1px solid var(--card-border);
+            position: relative;
+            height: 90px;
+        }
+
+        canvas#timelineCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            border-radius: 6px;
+        }
+
+        /* 播放控制条 */
+        .controls-panel {
+            background: var(--card-bg);
+            border-radius: 10px;
+            padding: 12px 18px;
+            border: 1px solid var(--card-border);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .progress-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .progress-bar {
+            flex: 1;
+            height: 6px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: #2e303e;
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .progress-bar::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--primary);
+            cursor: pointer;
+            box-shadow: 0 0 8px var(--primary);
+        }
+
+        .time-display {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-variant-numeric: tabular-nums;
+            min-width: 90px;
+            text-align: right;
+        }
+
+        .btn-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .btn-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        button {
+            background: #282a36;
+            color: var(--text-main);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+
+        button:hover {
+            background: #383a4c;
+            border-color: var(--primary);
+        }
+
+        button.primary-btn {
+            background: var(--primary);
+            border-color: var(--primary);
+        }
+
+        button.primary-btn:hover {
+            background: #6a3de8;
+        }
+
+        button.active {
+            background: rgba(0, 229, 255, 0.15);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* 右侧面板：活塞监控与调参 */
+        .sidebar-section {
+            flex: 1.2;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-width: 320px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            border: 1px solid var(--card-border);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .card-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--primary-light);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding-bottom: 8px;
+        }
+
+        /* 活塞物理深度监控 */
+        .stroke-monitor {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            padding: 8px 0;
+        }
+
+        .piston-track {
+            width: 36px;
+            height: 140px;
+            background: #111218;
+            border-radius: 18px;
+            border: 2px solid #282a36;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .piston-head {
+            width: 28px;
+            height: 28px;
+            background: linear-gradient(135deg, var(--accent), var(--primary));
+            border-radius: 50%;
+            position: absolute;
+            left: 2px;
+            bottom: 0%;
+            box-shadow: 0 0 12px var(--accent);
+            transition: bottom 0.06s linear;
+        }
+
+        .stroke-metrics {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+
+        .metric-value {
+            font-weight: 700;
+            color: var(--success);
+        }
+
+        /* 灵敏度与延迟滑块 */
+        .setting-slider-box {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .slider-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+
+        .slider-val {
+            color: #ffd700;
+            font-weight: 700;
+        }
+
+        input[type="range"].custom-slider {
+            width: 100%;
+            height: 5px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: #2e303e;
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        input[type="range"].custom-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--primary);
+            cursor: pointer;
+        }
+
+        /* 拖放载入区域 */
+        .drop-zone {
+            border: 2px dashed var(--primary);
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+            background: rgba(124, 77, 255, 0.05);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .drop-zone:hover, .drop-zone.dragover {
+            background: rgba(124, 77, 255, 0.15);
+            border-color: var(--accent);
+        }
+
+        .drop-text-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+            margin-bottom: 4px;
+        }
+
+        .drop-text-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* 全屏拖放遮罩 */
+        #globalOverlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 16, 21, 0.9);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            border: 4px dashed var(--accent);
+            pointer-events: none;
+        }
+        #globalOverlay span {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 全屏拖拽覆盖层 -->
+    <div id="globalOverlay">
+        <span>松开鼠标，载入音视频、.funscript 或 字幕文件</span>
+    </div>
+
+    <!-- 顶栏状态 -->
+    <header>
+        <div class="brand">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            Funscript Web Player
+        </div>
+        <div class="intiface-bar">
+            <div class="status-badge">
+                <div class="dot" id="wsDot"></div>
+                <span id="wsText">Intiface 未连接</span>
+            </div>
+            <div class="device-info" id="deviceName">玩具: -</div>
+            <button id="btnReconnect" style="padding: 3px 8px; font-size: 11px;">重连</button>
+        </div>
+    </header>
+
+    <!-- 主体区域 -->
+    <main>
+        <!-- 左侧视口 -->
+        <section class="player-section">
+            <div class="screen-container" id="screenBox">
+                <video id="mainVideo" playsinline></video>
+                <div class="audio-visualizer" id="audioVisualizer">
+                    <div class="audio-disc" id="audioDisc"></div>
+                    <div style="font-size: 14px; font-weight: 600;" id="audioName">正在播放音频作品</div>
+                </div>
+
+                <!-- 浮层字幕 -->
+                <div class="subtitle-overlay">
+                    <div class="subtitle-text" id="subtitleText"></div>
+                </div>
+            </div>
+
+            <!-- 时间轴脚本折线图 -->
+            <div class="timeline-canvas-box">
+                <canvas id="timelineCanvas"></canvas>
+            </div>
+
+            <!-- 播放控制台 -->
+            <div class="controls-panel">
+                <div class="progress-row">
+                    <input type="range" class="progress-bar" id="progressBar" min="0" max="100" value="0" step="0.01">
+                    <div class="time-display" id="timeDisplay">00:00 / 00:00</div>
+                </div>
+                <div class="btn-row">
+                    <div class="btn-group">
+                        <button class="primary-btn" id="btnPlayPause">▶ 播放</button>
+                        <button id="btnRewind">-5s</button>
+                        <button id="btnForward">+5s</button>
+                        <select id="playbackRate" style="background: #282a36; color: #fff; border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 6px; font-size: 12px;">
+                            <option value="0.75">0.75x</option>
+                            <option value="1.0" selected>1.0x</option>
+                            <option value="1.25">1.25x</option>
+                            <option value="1.5">1.5x</option>
+                        </select>
+                    </div>
+                    <div class="btn-group">
+                        <!-- 字幕切换按钮 -->
+                        <button id="btnSubtitleToggle" class="active" title="开启/关闭字幕">💬 字幕: 开</button>
+                        <select id="subtitleFontSize" style="background: #282a36; color: #fff; border: 1px solid rgba(255,255,255,0.1); padding: 5px 6px; border-radius: 6px; font-size: 12px;">
+                            <option value="16px">小字</option>
+                            <option value="19px" selected>中字</option>
+                            <option value="24px">大字</option>
+                        </select>
+                        <span style="font-size: 12px; color: var(--text-muted); margin-left: 6px;">音量:</span>
+                        <input type="range" id="volumeBar" min="0" max="1" step="0.05" value="1" style="width: 60px; accent-color: var(--primary);">
+                        <button id="btnFullscreen">全屏</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 右侧仪表与设置 -->
+        <section class="sidebar-section">
+            <!-- 活塞动态反馈 -->
+            <div class="card">
+                <div class="card-title">
+                    <span>⚡ 役次元活塞动态监控</span>
+                    <span id="scriptBadge" style="font-size: 10px; color: var(--danger);">未载入脚本</span>
+                </div>
+                <div class="stroke-monitor">
+                    <div class="piston-track">
+                        <div class="piston-head" id="pistonHead"></div>
+                    </div>
+                    <div class="stroke-metrics">
+                        <div class="metric-item">
+                            <span style="color: var(--text-muted);">活塞位置:</span>
+                            <span class="metric-value" id="metricPos">0%</span>
+                        </div>
+                        <div class="metric-item">
+                            <span style="color: var(--text-muted);">抽动速度:</span>
+                            <span class="metric-value" id="metricSpeed" style="color: var(--accent);">0%</span>
+                        </div>
+                        <div class="metric-item">
+                            <span style="color: var(--text-muted);">脚本动作点:</span>
+                            <span class="metric-value" id="metricActions" style="color: #fff;">0 点</span>
+                        </div>
+                        <div class="metric-item">
+                            <span style="color: var(--text-muted);">字幕状态:</span>
+                            <span class="metric-value" id="metricSubtitles" style="color: #ffd700;">未载入</span>
+                        </div>
+                        <div class="metric-item">
+                            <span style="color: var(--text-muted);">下发模式:</span>
+                            <span class="metric-value" style="color: #ffd700;">Oscillate (stroke)</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 灵敏度与同步微调 -->
+            <div class="card">
+                <div class="card-title">
+                    <span>🎛️ 互动参数调校</span>
+                    <button id="btnTest" style="padding: 2px 8px; font-size: 11px; background: rgba(0,229,255,0.1); color: var(--accent); border-color: var(--accent);">🧪 试动 2秒</button>
+                </div>
+
+                <!-- 灵敏度滑块 0% ~ 200% -->
+                <div class="setting-slider-box">
+                    <div class="slider-header">
+                        <span>抽动灵敏度 (0%~200%):</span>
+                        <span class="slider-val" id="sensVal">100%</span>
+                    </div>
+                    <input type="range" class="custom-slider" id="sensSlider" min="0" max="200" value="100">
+                </div>
+
+                <!-- 动作与音画延迟对齐 (毫秒) -->
+                <div class="setting-slider-box">
+                    <div class="slider-header">
+                        <span>时间轴微调 (延迟补偿):</span>
+                        <span class="slider-val" id="offsetVal">0 ms</span>
+                    </div>
+                    <input type="range" class="custom-slider" id="offsetSlider" min="-500" max="500" value="0" step="10">
+                </div>
+            </div>
+
+            <!-- 文件载入管理 -->
+            <div class="card">
+                <div class="card-title">
+                    <span>📂 文件载入与绑定</span>
+                </div>
+                <div class="drop-zone" id="dropZone">
+                    <div class="drop-text-title">拖入媒体、脚本与字幕</div>
+                    <div class="drop-text-sub">支持同时多选拖入音视频、.funscript 及 .srt/.vtt 字幕</div>
+                    <div style="display: flex; gap: 6px; justify-content: center; margin-top: 10px; flex-wrap: wrap;">
+                        <button id="btnSelectMedia">选择音视频</button>
+                        <button id="btnSelectScript">选择脚本</button>
+                        <button id="btnSelectSubtitle">选择字幕</button>
+                    </div>
+                    <input type="file" id="mediaInput" accept="video/*,audio/*" style="display: none;">
+                    <input type="file" id="scriptInput" accept=".funscript,.json" style="display: none;">
+                    <input type="file" id="subtitleInput" accept=".srt,.vtt,.lrc,.json,.txt" style="display: none;">
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // --- 核心状态与配置 ---
+        const INTIFACE_WS_URL = "ws://127.0.0.1:12345";
+        let ws = null;
+        let targetDeviceIndex = -1;
+        let targetDeviceName = "未连接";
+        let targetActuators = [];
+        let msgId = 1;
+
+        let funscriptActions = [];
+        let subtitles = []; // 存储解析后的字幕列表 [{ start: 1.5, end: 4.2, text: "..." }]
+        let isSubtitleEnabled = true;
+        let lastSeekIndex = 0;
+        let sensitivity = 1.0; // 0.0 ~ 2.0
+        let timeOffsetMs = 0;   // 延迟微调
+
+        // DOM 引用
+        const media = document.getElementById("mainVideo");
+        const audioVisualizer = document.getElementById("audioVisualizer");
+        const audioDisc = document.getElementById("audioDisc");
+        const audioName = document.getElementById("audioName");
+        const subtitleText = document.getElementById("subtitleText");
+        const btnSubtitleToggle = document.getElementById("btnSubtitleToggle");
+        const subtitleFontSize = document.getElementById("subtitleFontSize");
+
+        const btnPlayPause = document.getElementById("btnPlayPause");
+        const progressBar = document.getElementById("progressBar");
+        const timeDisplay = document.getElementById("timeDisplay");
+        const timelineCanvas = document.getElementById("timelineCanvas");
+        const ctx = timelineCanvas.getContext("2d");
+
+        const wsDot = document.getElementById("wsDot");
+        const wsText = document.getElementById("wsText");
+        const deviceName = document.getElementById("deviceName");
+        const pistonHead = document.getElementById("pistonHead");
+        const metricPos = document.getElementById("metricPos");
+        const metricSpeed = document.getElementById("metricSpeed");
+        const metricActions = document.getElementById("metricActions");
+        const metricSubtitles = document.getElementById("metricSubtitles");
+        const scriptBadge = document.getElementById("scriptBadge");
+
+        const sensSlider = document.getElementById("sensSlider");
+        const sensVal = document.getElementById("sensVal");
+        const offsetSlider = document.getElementById("offsetSlider");
+        const offsetVal = document.getElementById("offsetVal");
+
+        // --- 1. Intiface Central WebSocket 通信 ---
+        function connectIntiface() {
+            try {
+                ws = new WebSocket(INTIFACE_WS_URL);
+                ws.onopen = () => {
+                    wsDot.classList.add("connected");
+                    wsText.innerText = "Intiface 已连接";
+                    ws.send(JSON.stringify([{
+                        "RequestServerInfo": { "Id": msgId++, "ClientName": "FunscriptWebPlayer", "MessageVersion": 3 }
+                    }]));
+                };
+
+                ws.onmessage = (e) => {
+                    try {
+                        const msgs = JSON.parse(e.data);
+                        for (const msg of msgs) {
+                            if (msg.ServerInfo) {
+                                ws.send(JSON.stringify([{ "RequestDeviceList": { "Id": msgId++ } }]));
+                            } else if (msg.DeviceList && msg.DeviceList.Devices.length > 0) {
+                                inspectDevice(msg.DeviceList.Devices[0]);
+                            } else if (msg.DeviceAdded) {
+                                inspectDevice(msg.DeviceAdded);
+                            }
+                        }
+                    } catch(err) {}
+                };
+
+                ws.onclose = () => {
+                    wsDot.classList.remove("connected");
+                    wsText.innerText = "已断开";
+                    targetDeviceIndex = -1;
+                    deviceName.innerText = "玩具: -";
+                    setTimeout(connectIntiface, 3000);
+                };
+
+                ws.onerror = () => ws.close();
+            } catch(e) {
+                setTimeout(connectIntiface, 3000);
+            }
+        }
+        connectIntiface();
+        document.getElementById("btnReconnect").onclick = connectIntiface;
+
+        function inspectDevice(device) {
+            targetDeviceIndex = device.DeviceIndex;
+            targetDeviceName = device.DeviceName;
+            targetActuators = [];
+            if (device.DeviceMessages && device.DeviceMessages.ScalarCmd) {
+                for (let i = 0; i < device.DeviceMessages.ScalarCmd.length; i++) {
+                    const feat = device.DeviceMessages.ScalarCmd[i];
+                    targetActuators.push({
+                        Index: feat.FeatureIndex !== undefined ? feat.FeatureIndex : i,
+                        ActuatorType: feat.ActuatorType || "Oscillate"
+                    });
+                }
+            }
+            if (targetActuators.length === 0) {
+                targetActuators.push({ Index: 0, ActuatorType: "Oscillate" });
+            }
+            deviceName.innerText = `玩具: ${targetDeviceName}`;
+        }
+
+        function sendStroke(scalar) {
+            if (!ws || ws.readyState !== WebSocket.OPEN || targetDeviceIndex === -1) return;
+            const scalars = targetActuators.map(act => ({ Index: act.Index, Scalar: scalar, ActuatorType: act.ActuatorType }));
+            ws.send(JSON.stringify([{ "ScalarCmd": { "Id": msgId++, "DeviceIndex": targetDeviceIndex, "Scalars": scalars } }]));
+        }
+
+        document.getElementById("btnTest").onclick = () => {
+            sendStroke(0.6 * sensitivity);
+            setTimeout(() => sendStroke(0.0), 2000);
+        };
+
+        // --- 2. 媒体播放与控制 ---
+        btnPlayPause.onclick = togglePlay;
+        function togglePlay() {
+            if (media.paused) {
+                media.play();
+                btnPlayPause.innerText = "⏸ 暂停";
+                audioDisc.classList.add("playing");
+            } else {
+                media.pause();
+                btnPlayPause.innerText = "▶ 播放";
+                audioDisc.classList.remove("playing");
+                sendStroke(0.0);
+            }
+        }
+
+        media.onplay = () => { btnPlayPause.innerText = "⏸ 暂停"; audioDisc.classList.add("playing"); };
+        media.onpause = () => { btnPlayPause.innerText = "▶ 播放"; audioDisc.classList.remove("playing"); sendStroke(0.0); };
+        media.ontimeupdate = () => {
+            if (!isSeeking) {
+                progressBar.value = media.duration ? (media.currentTime / media.duration) * 100 : 0;
+            }
+            updateTimeDisplay();
+            updateSubtitle(media.currentTime);
+        };
+
+        function updateTimeDisplay() {
+            const cur = formatTime(media.currentTime);
+            const dur = formatTime(media.duration || 0);
+            timeDisplay.innerText = `${cur} / ${dur}`;
+        }
+
+        function formatTime(sec) {
+            const m = Math.floor(sec / 60).toString().padStart(2, '0');
+            const s = Math.floor(sec % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+        }
+
+        let isSeeking = false;
+        progressBar.oninput = () => { isSeeking = true; };
+        progressBar.onchange = () => {
+            isSeeking = false;
+            media.currentTime = (progressBar.value / 100) * media.duration;
+            lastSeekIndex = 0;
+        };
+
+        document.getElementById("btnRewind").onclick = () => { media.currentTime = Math.max(0, media.currentTime - 5); };
+        document.getElementById("btnForward").onclick = () => { media.currentTime = Math.min(media.duration, media.currentTime + 5); };
+        document.getElementById("playbackRate").onchange = (e) => { media.playbackRate = parseFloat(e.target.value); };
+        document.getElementById("volumeBar").oninput = (e) => { media.volume = parseFloat(e.target.value); };
+        document.getElementById("btnFullscreen").onclick = () => {
+            if (!document.fullscreenElement) document.getElementById("screenBox").requestFullscreen();
+            else document.exitFullscreen();
+        };
+
+        // --- 3. 字幕解析与实时渲染引擎 ---
+        function parseTimestamp(timeStr) {
+            // 支持 00:01:23,456 或 00:01:23.456 或 01:23.45
+            timeStr = timeStr.trim().replace(',', '.');
+            const parts = timeStr.split(':');
+            let seconds = 0;
+            if (parts.length === 3) {
+                seconds = parseInt(parts[0], 10) * 3600 + parseInt(parts[1], 10) * 60 + parseFloat(parts[2]);
+            } else if (parts.length === 2) {
+                seconds = parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
+            }
+            return isNaN(seconds) ? 0 : seconds;
+        }
+
+        function parseSRTorVTT(text) {
+            const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+            const result = [];
+            let current = null;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) {
+                    if (current) { result.push(current); current = null; }
+                    continue;
+                }
+
+                // 匹配时间轴行: 00:00:01,000 --> 00:00:04,000
+                if (line.includes('-->')) {
+                    const [startStr, endStr] = line.split('-->');
+                    current = {
+                        start: parseTimestamp(startStr),
+                        end: parseTimestamp(endStr),
+                        text: ""
+                    };
+                } else if (current && isNaN(Number(line))) {
+                    // 追加台词内容
+                    current.text += (current.text ? '\n' : '') + line;
+                }
+            }
+            if (current) result.push(current);
+            return result;
+        }
+
+        function parseLRC(text) {
+            const lines = text.split('\n');
+            const result = [];
+            const regex = /\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\](.*)/;
+
+            for (const line of lines) {
+                const match = line.match(regex);
+                if (match) {
+                    const min = parseInt(match[1], 10);
+                    const sec = parseInt(match[2], 10);
+                    const ms = match[3] ? parseFloat('0.' + match[3]) : 0;
+                    const time = min * 60 + sec + ms;
+                    const content = match[4].trim();
+                    if (content) {
+                        result.push({ start: time, end: time + 5, text: content });
+                    }
+                }
+            }
+            // 自动将下一句开始作为上一句结束
+            for (let i = 0; i < result.length - 1; i++) {
+                result[i].end = result[i + 1].start;
+            }
+            return result;
+        }
+
+        function loadSubtitleFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const content = e.target.result;
+                let parsed = [];
+
+                if (file.name.endsWith(".json")) {
+                    try {
+                        const json = JSON.parse(content);
+                        // 支持 asmr.one 导出的字幕 json
+                        if (Array.isArray(json)) {
+                            parsed = json.map(item => ({
+                                start: (item.start || item.startTime || 0) / 1000,
+                                end: (item.end || item.endTime || 5000) / 1000,
+                                text: item.text || item.content || ""
+                            }));
+                        }
+                    } catch(err) {}
+                } else if (file.name.endsWith(".lrc")) {
+                    parsed = parseLRC(content);
+                } else {
+                    // srt, vtt, txt
+                    parsed = parseSRTorVTT(content);
+                }
+
+                if (parsed.length > 0) {
+                    subtitles = parsed.sort((a, b) => a.start - b.start);
+                    metricSubtitles.innerText = `已载入 (${subtitles.length} 条)`;
+                    metricSubtitles.style.color = "var(--success)";
+                    btnSubtitleToggle.style.display = "inline-flex";
+                    console.log("[Subtitle] 成功载入字幕条目:", subtitles.length);
+                } else {
+                    alert("未能成功解析字幕，请确认是否为 .srt / .vtt / .lrc / .json 格式！");
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function updateSubtitle(currentTime) {
+            if (!isSubtitleEnabled || subtitles.length === 0) {
+                subtitleText.style.display = "none";
+                return;
+            }
+
+            // 查找当前时间所处的字幕
+            const match = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
+            if (match) {
+                subtitleText.innerText = match.text;
+                subtitleText.style.display = "inline-block";
+            } else {
+                subtitleText.style.display = "none";
+            }
+        }
+
+        // 字幕开关与字号切换
+        btnSubtitleToggle.onclick = () => {
+            isSubtitleEnabled = !isSubtitleEnabled;
+            btnSubtitleToggle.innerText = isSubtitleEnabled ? "💬 字幕: 开" : "💬 字幕: 关";
+            btnSubtitleToggle.classList.toggle("active", isSubtitleEnabled);
+            if (!isSubtitleEnabled) subtitleText.style.display = "none";
+        };
+
+        subtitleFontSize.onchange = (e) => {
+            subtitleText.style.fontSize = e.target.value;
+        };
+
+        // --- 4. Funscript 插值核心引擎 ---
+        setInterval(() => {
+            if (media.paused || funscriptActions.length < 2) {
+                if (media.paused) sendStroke(0.0);
+                return;
+            }
+
+            const currentMs = (media.currentTime * 1000) + timeOffsetMs;
+
+            if (sensitivity === 0) {
+                sendStroke(0.0);
+                metricSpeed.innerText = "0% (静音)";
+                return;
+            }
+
+            let idx = lastSeekIndex;
+            if (idx >= funscriptActions.length || funscriptActions[idx].at > currentMs) idx = 0;
+            while (idx < funscriptActions.length - 1 && funscriptActions[idx + 1].at < currentMs) {
+                idx++;
+            }
+            lastSeekIndex = idx;
+
+            const prev = funscriptActions[idx];
+            const next = funscriptActions[idx + 1];
+
+            if (prev && next) {
+                if (currentMs < prev.at) {
+                    sendStroke(0.0);
+                    metricPos.innerText = "0%";
+                    pistonHead.style.bottom = "0%";
+                    return;
+                }
+
+                const duration = next.at - prev.at;
+                if (duration > 0 && currentMs <= next.at) {
+                    const progress = (currentMs - prev.at) / duration;
+                    const pos = prev.pos + (next.pos - prev.pos) * progress;
+                    const distance = Math.abs(next.pos - prev.pos);
+                    const speed = (distance / duration) * 1000;
+
+                    let baseScalar = speed / 180.0;
+                    let scalar = Math.min(Math.max(baseScalar * sensitivity, 0.0), 1.0);
+                    if (distance === 0) scalar = 0.0;
+
+                    sendStroke(scalar);
+
+                    metricPos.innerText = `${Math.round(pos)}%`;
+                    pistonHead.style.bottom = `${pos}%`;
+                    metricSpeed.innerText = `${Math.round(scalar * 100)}%`;
+                } else {
+                    sendStroke(0.0);
+                }
+            }
+
+            drawTimeline(currentMs);
+        }, 40);
+
+        // --- 5. 绘制时间轴 Canvas 波形 ---
+        function resizeCanvas() {
+            timelineCanvas.width = timelineCanvas.clientWidth * window.devicePixelRatio;
+            timelineCanvas.height = timelineCanvas.clientHeight * window.devicePixelRatio;
+        }
+        window.onresize = resizeCanvas;
+        resizeCanvas();
+
+        function drawTimeline(currentMs) {
+            const w = timelineCanvas.width;
+            const h = timelineCanvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            if (funscriptActions.length < 2) return;
+
+            const windowRangeMs = 6000;
+            const startMs = currentMs - 2000;
+            const endMs = currentMs + 4000;
+
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#7c4dff";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            let first = true;
+
+            for (let i = 0; i < funscriptActions.length; i++) {
+                const a = funscriptActions[i];
+                if (a.at < startMs) continue;
+                if (a.at > endMs) break;
+
+                const x = ((a.at - startMs) / windowRangeMs) * w;
+                const y = h - (a.pos / 100.0) * (h - 10) - 5;
+
+                if (first) { ctx.moveTo(x, y); first = false; }
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            const cursorX = (2000 / windowRangeMs) * w;
+            ctx.strokeStyle = "#00e5ff";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cursorX, 0);
+            ctx.lineTo(cursorX, h);
+            ctx.stroke();
+        }
+
+        // --- 6. 文件加载与多选拖放智能分流 ---
+        function loadScriptFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    if (data.actions && Array.isArray(data.actions)) {
+                        funscriptActions = data.actions.sort((a, b) => a.at - b.at);
+                        metricActions.innerText = `${funscriptActions.length} 点`;
+                        scriptBadge.innerText = "脚本已载入";
+                        scriptBadge.style.color = "var(--success)";
+                        lastSeekIndex = 0;
+                    }
+                } catch(err) {
+                    alert("Funscript 解析失败: " + err.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function loadMediaFile(file) {
+            const isAudio = file.type.startsWith("audio") || file.name.match(/\.(mp3|wav|flac|m4a|ogg|aac)$/i);
+            const url = URL.createObjectURL(file);
+            media.src = url;
+
+            if (isAudio) {
+                media.style.display = "none";
+                audioVisualizer.style.display = "flex";
+                audioName.innerText = file.name;
+            } else {
+                media.style.display = "block";
+                audioVisualizer.style.display = "none";
+            }
+            media.load();
+        }
+
+        // 按钮选择
+        document.getElementById("btnSelectMedia").onclick = (e) => { e.stopPropagation(); document.getElementById("mediaInput").click(); };
+        document.getElementById("btnSelectScript").onclick = (e) => { e.stopPropagation(); document.getElementById("scriptInput").click(); };
+        document.getElementById("btnSelectSubtitle").onclick = (e) => { e.stopPropagation(); document.getElementById("subtitleInput").click(); };
+
+        document.getElementById("mediaInput").onchange = (e) => { if (e.target.files[0]) loadMediaFile(e.target.files[0]); };
+        document.getElementById("scriptInput").onchange = (e) => { if (e.target.files[0]) loadScriptFile(e.target.files[0]); };
+        document.getElementById("subtitleInput").onchange = (e) => { if (e.target.files[0]) loadSubtitleFile(e.target.files[0]); };
+
+        // 全局拖拽多文件自动分流
+        const overlay = document.getElementById("globalOverlay");
+        window.ondragover = (e) => { e.preventDefault(); overlay.style.display = "flex"; };
+        window.ondragleave = (e) => { if (e.clientX <= 0 || e.clientY <= 0) overlay.style.display = "none"; };
+        window.ondrop = (e) => {
+            e.preventDefault();
+            overlay.style.display = "none";
+            const files = Array.from(e.dataTransfer.files);
+            for (const file of files) {
+                const name = file.name.toLowerCase();
+                if (name.endsWith(".funscript")) {
+                    loadScriptFile(file);
+                } else if (name.endsWith(".srt") || name.endsWith(".vtt") || name.endsWith(".lrc")) {
+                    loadSubtitleFile(file);
+                } else if (file.type.startsWith("video") || file.type.startsWith("audio") || name.match(/\.(mp4|mkv|webm|mp3|wav|flac|m4a|ogg)$/i)) {
+                    loadMediaFile(file);
+                } else if (name.endsWith(".json")) {
+                    // 尝试智能检测是 funscript 还是 字幕
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                        try {
+                            const d = JSON.parse(ev.target.result);
+                            if (d.actions) loadScriptFile(file);
+                            else loadSubtitleFile(file);
+                        } catch(err) {}
+                    };
+                    reader.readAsText(file);
+                }
+            }
+        };
+
+        // --- 7. 参数调校事件 ---
+        sensSlider.oninput = (e) => {
+            const v = parseInt(e.target.value, 10);
+            sensitivity = v / 100.0;
+            sensVal.innerText = `${v}%`;
+        };
+
+        offsetSlider.oninput = (e) => {
+            timeOffsetMs = parseInt(e.target.value, 10);
+            offsetVal.innerText = `${timeOffsetMs > 0 ? '+' : ''}${timeOffsetMs} ms`;
+        };
+    </script>
+</body>
+</html>
