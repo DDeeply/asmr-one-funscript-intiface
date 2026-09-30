@@ -616,14 +616,14 @@
                 </div>
                 <div class="drop-zone" id="dropZone">
                     <div class="drop-text-title">拖入媒体、脚本与字幕</div>
-                    <div class="drop-text-sub">支持同时多选拖入音视频、.funscript 及 .srt/.vtt 字幕</div>
+                    <div class="drop-text-sub">支持同时多选拖入音视频、.funscript / .csv 脚本及各类字幕</div>
                     <div style="display: flex; gap: 6px; justify-content: center; margin-top: 10px; flex-wrap: wrap;">
                         <button id="btnSelectMedia">选择音视频</button>
-                        <button id="btnSelectScript">选择脚本</button>
+                        <button id="btnSelectScript">选择脚本 (Funscript/CSV)</button>
                         <button id="btnSelectSubtitle">选择字幕</button>
                     </div>
                     <input type="file" id="mediaInput" accept="video/*,audio/*" style="display: none;">
-                    <input type="file" id="scriptInput" accept=".funscript,.json" style="display: none;">
+                    <input type="file" id="scriptInput" accept=".funscript,.json,.csv,.txt" style="display: none;">
                     <input type="file" id="subtitleInput" accept=".srt,.vtt,.lrc,.json,.txt" style="display: none;">
                 </div>
             </div>
@@ -1048,20 +1048,107 @@
         }
 
         // --- 6. 文件加载与多选拖放智能分流 ---
+        function parseMotionScript(text) {
+            if (!text || typeof text !== "string") return null;
+            const cleanText = text.trim().replace(/^\ufeff/, "");
+
+            // 1. JSON (Funscript)
+            if (cleanText.startsWith("{") || cleanText.startsWith("[")) {
+                try {
+                    const data = JSON.parse(cleanText);
+                    const acts = data.actions || (Array.isArray(data) ? data : null);
+                    if (acts && Array.isArray(acts) && acts.length > 0) {
+                        return {
+                            type: "funscript",
+                            desc: "Funscript",
+                            actions: acts.map(a => ({ at: Number(a.at), pos: Number(a.pos) })).sort((a, b) => a.at - b.at)
+                        };
+                    }
+                } catch(e) {}
+            }
+
+            // 2. CSV / TXT
+            const lines = cleanText.split(/\r?\n/);
+            const validRows = [];
+            for (let line of lines) {
+                line = line.trim();
+                if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+                const parts = line.split(/[,\t;]/).map(s => s.trim());
+                if (parts.length >= 2) {
+                    const col0 = parseFloat(parts[0]);
+                    const col1 = parseFloat(parts[1]);
+                    const col2 = parts.length >= 3 ? parseFloat(parts[2]) : null;
+                    if (!isNaN(col0) && !isNaN(col1)) {
+                        validRows.push({ col0, col1, col2 });
+                    }
+                }
+            }
+
+            if (validRows.length < 2) return null;
+
+            const is3Col = validRows.every(r => r.col2 !== null && !isNaN(r.col2));
+            if (is3Col) {
+                const isRotate = validRows.every(r => r.col1 === 0 || r.col1 === 1);
+                if (isRotate) {
+                    // Vorze Cyclone / UFO 旋转脚本: [时间(100ms), 方向(0/1), 速度(0~100)]
+                    const actions = validRows.map(r => ({
+                        at: Math.round(r.col0 * 100),
+                        pos: Math.round(r.col2),
+                        speed: r.col2,
+                        dir: r.col1
+                    })).sort((a, b) => a.at - b.at);
+                    return {
+                        type: "vorze-rotate",
+                        desc: "Vorze旋转CSV",
+                        actions
+                    };
+                } else {
+                    // Vorze Piston (A10 Piston SA) 活塞脚本: [时间(100ms), 位置(0~200), 速度(0~100)]
+                    const actions = validRows.map(r => ({
+                        at: Math.round(r.col0 * 100),
+                        pos: Math.max(0, Math.min(100, Math.round((r.col1 / 200.0) * 100))),
+                        speed: r.col2
+                    })).sort((a, b) => a.at - b.at);
+                    return {
+                        type: "vorze-piston",
+                        desc: "Vorze活塞CSV",
+                        actions
+                    };
+                }
+            } else {
+                // 2列 CSV: [时间, 位置]
+                const maxTime = validRows[validRows.length - 1].col0;
+                let timeMultiplier = 1;
+                if (maxTime < 3600) {
+                    timeMultiplier = 1000;
+                } else if (maxTime < 50000) {
+                    timeMultiplier = 100;
+                }
+                const actions = validRows.map(r => ({
+                    at: Math.round(r.col0 * timeMultiplier),
+                    pos: Math.max(0, Math.min(100, Math.round(r.col1)))
+                })).sort((a, b) => a.at - b.at);
+                return {
+                    type: "csv-2col",
+                    desc: "时间轴CSV",
+                    actions
+                };
+            }
+        }
+
         function loadScriptFile(file) {
             const reader = new FileReader();
             reader.onload = (e) => {
-                try {
-                    const data = JSON.parse(e.target.result);
-                    if (data.actions && Array.isArray(data.actions)) {
-                        funscriptActions = data.actions.sort((a, b) => a.at - b.at);
-                        metricActions.innerText = `${funscriptActions.length} 点`;
-                        scriptBadge.innerText = "脚本已载入";
-                        scriptBadge.style.color = "var(--success)";
-                        lastSeekIndex = 0;
-                    }
-                } catch(err) {
-                    alert("Funscript 解析失败: " + err.message);
+                const parsed = parseMotionScript(e.target.result);
+                if (parsed && parsed.actions && parsed.actions.length > 0) {
+                    funscriptActions = parsed.actions;
+                    metricActions.innerText = `${funscriptActions.length} 点`;
+                    scriptBadge.innerText = `${parsed.desc} 已载入`;
+                    scriptBadge.style.color = "var(--success)";
+                    lastSeekIndex = 0;
+                    console.log(`[Script] 载入成功 [${parsed.type}], 动作点数:`, funscriptActions.length);
+                } else {
+                    alert("脚本解析失败: 请确认是否为标准 .funscript 或 Vorze / 通用 CSV 格式！");
                 }
             };
             reader.readAsText(file);
@@ -1102,7 +1189,7 @@
             const files = Array.from(e.dataTransfer.files);
             for (const file of files) {
                 const name = file.name.toLowerCase();
-                if (name.endsWith(".funscript")) {
+                if (name.endsWith(".funscript") || name.endsWith(".csv")) {
                     loadScriptFile(file);
                 } else if (name.endsWith(".srt") || name.endsWith(".vtt") || name.endsWith(".lrc")) {
                     loadSubtitleFile(file);

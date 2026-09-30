@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ASMR.one (Kikoeru) RJ嗅探 + Funscript同步播放器 (Intiface驱动)
+// @name         ASMR.one (Kikoeru) RJ嗅探 + Funscript/CSV同步播放器 (Intiface驱动)
 // @namespace    https://github.com/ykcjack/asmr-one-intiface
-// @version      5.8.0
-// @description  在 ASMR.one 网页端自动嗅探当前 RJ 编号并联动 EroScripts，支持拖入 .funscript 脚本高频同步控制外设，支持役次元活塞（Oscillate）与多轴设备，提供 0%~200% 灵敏度微调悬浮窗。
+// @version      5.9.0
+// @description  在 ASMR.one 网页端自动嗅探当前 RJ 编号并联动 EroScripts，支持拖入 .funscript 及 Vorze/通用 .csv 脚本高频同步控制外设，支持役次元活塞（Oscillate）与多轴设备，提供 0%~200% 灵敏度微调悬浮窗。
 // @author       ykcjack
 // @match        https://www.asmr.one/*
 // @match        https://asmr.one/*
@@ -13,7 +13,7 @@
 (function() {
     'use strict';
 
-    console.log("[ASMR-Funscript] v5.8 灵敏度 0%~200% 版加载...");
+    console.log("[ASMR-Funscript] v5.9 扩展版 (支持 Funscript + Vorze CSV) 加载...");
 
     const INTIFACE_WS_URL = "ws://127.0.0.1:12345";
     let ws = null;
@@ -89,8 +89,8 @@
 
             <!-- 拖放区域 -->
             <div id="af-drop-zone" style="border: 2px dashed #7c4dff; border-radius: 8px; padding: 8px; text-align: center; background: rgba(124, 77, 255, 0.1); cursor: pointer;">
-                <span style="color: #cfd8dc; font-size: 11px;">📂 拖拽 .funscript 到此<br>或点击选择文件</span>
-                <input type="file" id="af-file-input" accept=".funscript,.json" style="display: none;">
+                <span style="color: #cfd8dc; font-size: 11px;">📂 拖拽 .funscript / .csv 到此<br>或点击选择文件</span>
+                <input type="file" id="af-file-input" accept=".funscript,.json,.csv,.txt" style="display: none;">
             </div>
 
             <!-- 测试按钮 -->
@@ -229,15 +229,104 @@
     }
     setInterval(sniffRJ, 1500);
 
-    function loadFunscript(text) {
-        try {
-            const data = JSON.parse(text);
-            if (data.actions && Array.isArray(data.actions) && data.actions.length > 0) {
-                funscriptActions = data.actions.sort((a, b) => a.at - b.at);
-                lastSeekIndex = 0;
-                document.getElementById("af-script-status").innerHTML = `<span style="color:#4cd964;">已载入 (${funscriptActions.length} 动作点)</span>`;
-            } else { alert("文件中未找到 actions 动作点！"); }
-        } catch(e) { alert("脚本解析失败: " + e.message); }
+    function parseMotionScript(text) {
+        if (!text || typeof text !== "string") return null;
+        const cleanText = text.trim().replace(/^\ufeff/, "");
+
+        // 1. JSON (Funscript)
+        if (cleanText.startsWith("{") || cleanText.startsWith("[")) {
+            try {
+                const data = JSON.parse(cleanText);
+                const acts = data.actions || (Array.isArray(data) ? data : null);
+                if (acts && Array.isArray(acts) && acts.length > 0) {
+                    return {
+                        type: "funscript",
+                        desc: "Funscript JSON",
+                        actions: acts.map(a => ({ at: Number(a.at), pos: Number(a.pos) })).sort((a, b) => a.at - b.at)
+                    };
+                }
+            } catch(e) {}
+        }
+
+        // 2. CSV / TXT
+        const lines = cleanText.split(/\r?\n/);
+        const validRows = [];
+        for (let line of lines) {
+            line = line.trim();
+            if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+            const parts = line.split(/[,\t;]/).map(s => s.trim());
+            if (parts.length >= 2) {
+                const col0 = parseFloat(parts[0]);
+                const col1 = parseFloat(parts[1]);
+                const col2 = parts.length >= 3 ? parseFloat(parts[2]) : null;
+                if (!isNaN(col0) && !isNaN(col1)) {
+                    validRows.push({ col0, col1, col2 });
+                }
+            }
+        }
+
+        if (validRows.length < 2) return null;
+
+        const is3Col = validRows.every(r => r.col2 !== null && !isNaN(r.col2));
+        if (is3Col) {
+            const isRotate = validRows.every(r => r.col1 === 0 || r.col1 === 1);
+            if (isRotate) {
+                // Vorze Cyclone / UFO 旋转脚本: [时间(100ms), 方向(0/1), 速度(0~100)]
+                const actions = validRows.map(r => ({
+                    at: Math.round(r.col0 * 100),
+                    pos: Math.round(r.col2),
+                    speed: r.col2,
+                    dir: r.col1
+                })).sort((a, b) => a.at - b.at);
+                return {
+                    type: "vorze-rotate",
+                    desc: "Vorze 旋转 CSV (Cyclone/UFO)",
+                    actions
+                };
+            } else {
+                // Vorze Piston (A10 Piston SA) 活塞脚本: [时间(100ms), 位置(0~200), 速度(0~100)]
+                const actions = validRows.map(r => ({
+                    at: Math.round(r.col0 * 100),
+                    pos: Math.max(0, Math.min(100, Math.round((r.col1 / 200.0) * 100))),
+                    speed: r.col2
+                })).sort((a, b) => a.at - b.at);
+                return {
+                    type: "vorze-piston",
+                    desc: "Vorze 活塞 CSV (Piston SA)",
+                    actions
+                };
+            }
+        } else {
+            // 2列 CSV: [时间, 位置]
+            const maxTime = validRows[validRows.length - 1].col0;
+            let timeMultiplier = 1;
+            if (maxTime < 3600) {
+                timeMultiplier = 1000;
+            } else if (maxTime < 50000) {
+                timeMultiplier = 100;
+            }
+            const actions = validRows.map(r => ({
+                at: Math.round(r.col0 * timeMultiplier),
+                pos: Math.max(0, Math.min(100, Math.round(r.col1)))
+            })).sort((a, b) => a.at - b.at);
+            return {
+                type: "csv-2col",
+                desc: "时间轴 CSV",
+                actions
+            };
+        }
+    }
+
+    function loadScript(text) {
+        const parsed = parseMotionScript(text);
+        if (parsed && parsed.actions && parsed.actions.length > 0) {
+            funscriptActions = parsed.actions;
+            lastSeekIndex = 0;
+            document.getElementById("af-script-status").innerHTML = `<span style="color:#4cd964;">已载入: ${parsed.desc} (${funscriptActions.length} 动作点)</span>`;
+            console.log(`[Script] 载入成功 [${parsed.type}], 动作点数:`, funscriptActions.length);
+        } else {
+            alert("未能成功解析脚本，请确认文件是否为标准 .funscript 或 Vorze / 通用 CSV 格式！");
+        }
     }
 
     const dropZone = document.getElementById("af-drop-zone");
@@ -247,7 +336,7 @@
         const file = e.target.files[0];
         if (file) {
             const reader = new FileReader();
-            reader.onload = (ev) => loadFunscript(ev.target.result);
+            reader.onload = (ev) => loadScript(ev.target.result);
             reader.readAsText(file);
         }
     };
@@ -259,7 +348,7 @@
         const file = e.dataTransfer.files[0];
         if (file) {
             const reader = new FileReader();
-            reader.onload = (ev) => loadFunscript(ev.target.result);
+            reader.onload = (ev) => loadScript(ev.target.result);
             reader.readAsText(file);
         }
     };
