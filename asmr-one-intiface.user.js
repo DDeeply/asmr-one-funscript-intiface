@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ASMR.one (Kikoeru) RJ嗅探 + Funscript/CSV同步播放器 (Intiface驱动)
 // @namespace    https://github.com/ykcjack/asmr-one-intiface
-// @version      5.9.0
+// @version      5.9.1
 // @description  在 ASMR.one 网页端自动嗅探当前 RJ 编号并联动 EroScripts，支持拖入 .funscript 及 Vorze/通用 .csv 脚本高频同步控制外设，支持役次元活塞（Oscillate）与多轴设备，提供 0%~200% 灵敏度微调悬浮窗。
 // @author       ykcjack
 // @match        https://www.asmr.one/*
@@ -13,7 +13,7 @@
 (function() {
     'use strict';
 
-    console.log("[ASMR-Funscript] v5.9 扩展版 (支持 Funscript + Vorze CSV) 加载...");
+    console.log("[ASMR-Funscript] v5.9.1 修复版 (已修复旋转脚本在活塞上的冲程驱动) 加载...");
 
     const INTIFACE_WS_URL = "ws://127.0.0.1:12345";
     let ws = null;
@@ -272,12 +272,21 @@
             const isRotate = validRows.every(r => r.col1 === 0 || r.col1 === 1);
             if (isRotate) {
                 // Vorze Cyclone / UFO 旋转脚本: [时间(100ms), 方向(0/1), 速度(0~100)]
-                const actions = validRows.map(r => ({
-                    at: Math.round(r.col0 * 100),
-                    pos: Math.round(r.col2),
-                    speed: r.col2,
-                    dir: r.col1
-                })).sort((a, b) => a.at - b.at);
+                // 核心映射：方向 0/1 轮替即为活塞的 顶/底 (伸/缩) 行程！
+                const actions = validRows.map(r => {
+                    const spd = r.col2;
+                    let pos = 0;
+                    if (spd > 0) {
+                        const halfStroke = (spd / 100.0) * 45.0; // 速度越快，抽动冲程越饱满深沉
+                        pos = Math.round(r.col1 === 0 ? (50.0 + halfStroke) : (50.0 - halfStroke));
+                    }
+                    return {
+                        at: Math.round(r.col0 * 100),
+                        pos: pos,
+                        speed: spd,
+                        dir: r.col1
+                    };
+                }).sort((a, b) => a.at - b.at);
                 return {
                     type: "vorze-rotate",
                     desc: "Vorze 旋转 CSV (Cyclone/UFO)",
@@ -404,17 +413,29 @@
             }
 
             const duration = next.at - prev.at;
+            // 如果两个动作点间隔超过 3.5 秒，且当前已经离前一点超过 1.5 秒以上，则处于间歇静止待机
+            if (duration > 3500 && (currentMs - prev.at > 1500) && (next.at - currentMs > 1000)) {
+                sendStroke(0.0, "待机静止");
+                return;
+            }
+
             if (duration > 0 && currentMs <= next.at) {
                 const progress = (currentMs - prev.at) / duration;
                 const currentPos = prev.pos + (next.pos - prev.pos) * progress;
 
                 const distance = Math.abs(next.pos - prev.pos);
-                const speed = (distance / duration) * 1000;
+                let speed = (distance / duration) * 1000;
 
                 // 灵敏度倍率计算 (0% ~ 200%)
                 let baseScalar = speed / 180.0;
+                // 若脚本带有明确的速度设定值 (如 Vorze 脚本)，直接融合设定速度，避免恒速段被误判为 0
+                if (prev.speed !== undefined && prev.speed > 0) {
+                    const presetScalar = prev.speed / 100.0;
+                    baseScalar = Math.max(baseScalar, presetScalar * 0.85);
+                }
+
                 let scalar = Math.min(Math.max(baseScalar * sensitivity, 0.0), 1.0);
-                if (distance === 0) scalar = 0.0;
+                if (distance === 0 && (!prev.speed || prev.speed === 0)) scalar = 0.0;
 
                 sendStroke(scalar, `速度 ${Math.round(scalar * 100)}% | 深度 ${Math.round(currentPos)}%`);
             } else {
