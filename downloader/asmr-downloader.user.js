@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ASMR.one (Kikoeru) 全能音频批量下载器 (一键打包 ZIP 保持目录结构版)
 // @namespace    https://github.com/ykcjack/asmr-one-tools
-// @version      2.0.0
-// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包，解压后完美还原所有子文件夹，绝不混淆；内置实时进度条、树状目录折叠全选/反选与封面整合。
+// @version      2.0.1
+// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包，解压后完美还原所有子文件夹，绝不混淆；内存直通加速，解决大文件卡死问题；内置实时进度条、树状目录折叠全选/反选与封面整合。
 // @author       ykcjack
 // @match        https://www.asmr.one/*
 // @match        https://asmr.one/*
@@ -19,12 +19,12 @@
 (function() {
     'use strict';
 
-    console.log("[ASMR-Downloader] v2.0 一键 ZIP 目录压缩打包版启动...");
+    console.log("[ASMR-Downloader] v2.0.1 一键 ZIP 目录压缩打包版 (内存直通加速) 启动...");
 
     let currentWorkTitle = "ASMR作品";
     let currentRJ = "";
-    let rawTreeData = []; // 原始树形结构
-    let flatFileList = []; // 扁平文件引用列表，便于快速统计
+    let rawTreeData = [];
+    let flatFileList = [];
     let coverUrl = "";
     let isFetching = false;
     let isZipping = false;
@@ -34,15 +34,15 @@
     function ensureJSZip() {
         return new Promise((resolve, reject) => {
             if (typeof JSZip !== "undefined") {
-                return resolve(window.JSZip);
+                return resolve(window.JSZip || JSZip);
             }
             const s1 = document.createElement("script");
             s1.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
-            s1.onload = () => resolve(window.JSZip);
+            s1.onload = () => resolve(window.JSZip || JSZip);
             s1.onerror = () => {
                 const s2 = document.createElement("script");
                 s2.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-                s2.onload = () => resolve(window.JSZip);
+                s2.onload = () => resolve(window.JSZip || JSZip);
                 s2.onerror = () => reject(new Error("无法加载 JSZip 库，请检查网络连接！"));
                 document.head.appendChild(s2);
             };
@@ -79,7 +79,6 @@
         </div>
 
         <div id="dl-modal" style="display: none; width: 400px; max-height: 580px; background: rgba(18, 18, 26, 0.98); border: 1px solid #7c4dff; border-radius: 12px; padding: 14px; margin-top: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.85); flex-direction: column; gap: 10px;">
-            <!-- 拖拽顶栏 -->
             <div id="dl-drag-header" style="cursor: move; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px;">
                 <b style="color: #b388ff; font-size: 13px;" id="dl-work-title">📦 ASMR 树状目录打包器 (按住拖动)</b>
                 <div style="display: flex; gap: 8px; align-items: center;">
@@ -93,19 +92,21 @@
                 <span>📦 一键打包下载 ZIP (保持完整层级结构)</span>
             </button>
 
-            <!-- ZIP 打包实时进度条浮层 (默认隐藏) -->
-            <div id="dl-zip-progress-box" style="display: none; background: rgba(124, 77, 255, 0.15); border: 1px solid #7c4dff; border-radius: 8px; padding: 8px 10px; flex-direction: column; gap: 6px;">
+            <!-- ZIP 打包实时进度条浮层 -->
+            <div id="dl-zip-progress-box" style="display: none; background: rgba(124, 77, 255, 0.15); border: 1px solid #7c4dff; border-radius: 8px; padding: 10px; flex-direction: column; gap: 6px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <b id="dl-progress-title" style="color: #00e5ff; font-size: 11px;">正在打包...</b>
+                    <b id="dl-progress-title" style="color: #00e5ff; font-size: 11px;">准备下载...</b>
                     <button id="btn-zip-cancel" style="background: #ff5252; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px;">✕ 取消</button>
                 </div>
                 <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
                     <div id="dl-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #7c4dff, #00e5ff); transition: width 0.2s;"></div>
                 </div>
                 <div style="display: flex; justify-content: space-between; font-size: 10px; color: #ccc;">
-                    <span id="dl-progress-detail">准备下载...</span>
+                    <span id="dl-progress-detail" style="max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">准备下载...</span>
                     <span id="dl-progress-size">0 MB</span>
                 </div>
+                <!-- 手动下载备用按钮容器 -->
+                <div id="dl-manual-download-container" style="display: none; margin-top: 4px;"></div>
             </div>
 
             <!-- 其他辅助功能 -->
@@ -150,6 +151,7 @@
     const progressDetail = document.getElementById("dl-progress-detail");
     const progressSize = document.getElementById("dl-progress-size");
     const btnZipCancel = document.getElementById("btn-zip-cancel");
+    const manualContainer = document.getElementById("dl-manual-download-container");
 
     toggleBtn.onclick = () => { modal.style.display = modal.style.display === "none" ? "flex" : "none"; };
     closeBtn.onclick = () => { modal.style.display = "none"; };
@@ -324,7 +326,7 @@
         updateSelectionCount();
     }
 
-    // --- 5. 跨域网络请求 ---
+    // --- 5. 跨域网络请求 (采用 ArrayBuffer 直通传输，彻底避免 Blob 桥接死锁) ---
     function gmFetchJSON(url, token = "") {
         return new Promise((resolve, reject) => {
             const headers = { "Accept": "application/json" };
@@ -334,17 +336,19 @@
                 method: "GET",
                 url: url,
                 headers: headers,
+                timeout: 30000,
                 onload: (res) => {
                     if (res.status >= 200 && res.status < 300) {
                         try { resolve(JSON.parse(res.responseText)); } catch(e) { reject(e); }
                     } else { reject(new Error(`HTTP ${res.status}`)); }
                 },
-                onerror: (err) => reject(err)
+                onerror: (err) => reject(err),
+                ontimeout: () => reject(new Error("网络请求超时 (30s)"))
             });
         });
     }
 
-    function gmFetchBlob(url, token = "") {
+    function gmFetchArrayBuffer(url, token = "", timeoutMs = 60000) {
         return new Promise((resolve, reject) => {
             const headers = {};
             if (token) headers["Authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
@@ -353,7 +357,8 @@
                 method: "GET",
                 url: url,
                 headers: headers,
-                responseType: "blob",
+                responseType: "arraybuffer",
+                timeout: timeoutMs,
                 onload: (res) => {
                     if (res.status >= 200 && res.status < 300) {
                         resolve(res.response);
@@ -362,7 +367,7 @@
                     }
                 },
                 onerror: (err) => reject(err),
-                ontimeout: () => reject(new Error("Timeout"))
+                ontimeout: () => reject(new Error("下载单曲超时 (60s)"))
             });
         });
     }
@@ -435,7 +440,7 @@
         return selected;
     }
 
-    // --- 6. 核心：一键打包 ZIP 压缩包下载（绝对保持目录结构） ---
+    // --- 6. 核心：一键打包 ZIP 压缩包下载（内存直通，绝不卡死） ---
     async function startZipDownload() {
         if (isZipping) {
             alert("当前正在打包下载中，请稍候！");
@@ -460,26 +465,29 @@
         isZipping = true;
         abortZipping = false;
 
+        manualContainer.style.display = "none";
+        manualContainer.innerHTML = "";
+        btnZipCancel.style.display = "inline-block";
         zipProgressBox.style.display = "flex";
         progressBar.style.width = "0%";
-        progressTitle.innerText = `正在打包 ZIP (${selected.length} 个文件)...`;
+        progressTitle.innerText = `正在下载数据 (${selected.length} 个文件)...`;
 
         const zip = new ZipLib();
         let downloadedBytes = 0;
         let downloadedCount = 0;
         const token = localStorage.getItem("token") || localStorage.getItem("jwt") || sessionStorage.getItem("token") || "";
 
-        // 如果包含封面，先打包封面
+        // 1. 如果包含封面，先打包封面
         if (coverUrl) {
             try {
-                const coverBlob = await gmFetchBlob(coverUrl, token);
-                zip.file(`${rootFolder}/cover.jpg`, coverBlob);
+                const coverAb = await gmFetchArrayBuffer(coverUrl, token, 20000);
+                zip.file(`${rootFolder}/cover.jpg`, coverAb, { binary: true });
             } catch(e) {
                 console.warn("[ZIP] 封面获取跳过:", e);
             }
         }
 
-        // 并发队列（2个并发，兼顾速度与内存）
+        // 2. 并发下载队列 (并发数 2，兼顾速度与浏览器内存健康)
         const queue = [...selected];
         const concurrency = 2;
 
@@ -489,20 +497,23 @@
                 progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 下载: ${item.title}`;
 
                 try {
-                    const blob = await gmFetchBlob(item.url, token);
-                    downloadedBytes += blob.size;
+                    // 使用 ArrayBuffer 二进制内存直通，绝不经过 Blob 转换
+                    const ab = await gmFetchArrayBuffer(item.url, token);
+                    downloadedBytes += ab.byteLength;
                     downloadedCount++;
 
                     // 规范化文件相对路径，存入 ZIP
                     const zipPath = `${rootFolder}/${item.fullPath}`;
-                    zip.file(zipPath, blob);
+                    zip.file(zipPath, ab, { binary: true });
 
-                    const percent = Math.round((downloadedCount / selected.length) * 85); // 下载占 85% 进度
+                    const percent = Math.round((downloadedCount / selected.length) * 85);
                     progressBar.style.width = `${percent}%`;
                     progressSize.innerText = `${(downloadedBytes / (1024 * 1024)).toFixed(1)} MB`;
+                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 已载入: ${item.title}`;
                 } catch(err) {
-                    console.error("[ZIP] 下载单曲失败:", item.fullPath, err);
+                    console.error("[ZIP] 下载单文件失败:", item.fullPath, err);
                     downloadedCount++;
+                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 下载跳过: ${item.title}`;
                 }
             }
         }
@@ -517,25 +528,30 @@
             return;
         }
 
-        progressTitle.innerText = "🗜️ 音频下载完成，正在构建生成 ZIP 文件...";
-        progressBar.style.width = "90%";
+        // 3. 构建 ZIP 压缩包 (启用 streamFiles 流式处理与 STORE 免重复压缩)
+        progressTitle.innerText = "🗜️ 全部文件已下载，正在瞬间生成 ZIP 压缩包...";
+        progressBar.style.width = "88%";
+        progressDetail.innerText = "正在组装 ZIP 目录树结构...";
 
         try {
-            // 使用 STORE 存储压缩（音频本身已是 mp3/wav/flac 编码），速度极快，瞬间生成
             const zipBlob = await zip.generateAsync({
                 type: "blob",
-                compression: "STORE"
+                compression: "STORE",
+                streamFiles: true
             }, (metadata) => {
-                const p = 85 + Math.round(metadata.percent * 0.15);
+                const p = 88 + Math.round(metadata.percent * 0.12);
                 progressBar.style.width = `${p}%`;
-                progressDetail.innerText = `压缩构建进度: ${Math.round(metadata.percent)}%`;
+                progressDetail.innerText = `ZIP 封装进度: ${Math.round(metadata.percent)}%`;
             });
 
             progressBar.style.width = "100%";
-            progressTitle.innerText = "✅ 压缩完成，已触发浏览器保存！";
+            progressTitle.innerText = "✅ ZIP 生成完毕！";
+            progressDetail.innerText = "已自动触发保存，若浏览器拦截请点击下方按钮：";
 
-            // 触发下载
             const blobUrl = URL.createObjectURL(zipBlob);
+            const sizeMB = (zipBlob.size / (1024 * 1024)).toFixed(1);
+
+            // 自动触发浏览器保存
             const a = document.createElement("a");
             a.href = blobUrl;
             a.download = zipFileName;
@@ -543,13 +559,19 @@
             a.click();
             document.body.removeChild(a);
 
-            setTimeout(() => {
-                URL.revokeObjectURL(blobUrl);
-                zipProgressBox.style.display = "none";
-                isZipping = false;
-            }, 3000);
+            // 同时渲染醒目的手动下载备用按钮（防止浏览器因为长时间异步操作阻断自动弹窗）
+            manualContainer.style.display = "block";
+            manualContainer.innerHTML = `
+                <a id="btn-manual-save-zip" href="${blobUrl}" download="${zipFileName}" style="display: block; background: #4cd964; color: #000; text-align: center; padding: 8px 12px; border-radius: 6px; font-weight: bold; text-decoration: none; font-size: 12px; box-shadow: 0 2px 8px rgba(76,217,100,0.4);">
+                    💾 点击直接保存 ZIP 压缩包 (${sizeMB} MB)
+                </a>
+            `;
+
+            btnZipCancel.style.display = "none";
+            isZipping = false;
 
         } catch(zipErr) {
+            console.error("生成 ZIP 失败:", zipErr);
             alert("生成 ZIP 失败: " + zipErr.message);
             zipProgressBox.style.display = "none";
             isZipping = false;
@@ -574,7 +596,6 @@
         }
     }
 
-    // 复制选中直链 (IDM 格式)
     document.getElementById("btn-copy-links").onclick = () => {
         const selected = getSelectedFiles();
         if (!selected) return;
@@ -587,7 +608,6 @@
         alert(`✅ 已复制 ${selected.length} 个直链！\n在 IDM / 迅雷 中按 Ctrl+V 批量下载。`);
     };
 
-    // 导出带相对路径的清单 (Aria2 格式)
     document.getElementById("btn-export-txt").onclick = () => {
         const selected = getSelectedFiles();
         if (!selected) return;
@@ -606,7 +626,6 @@
         a.click();
     };
 
-    // 浏览器批量自动按文件夹下载
     document.getElementById("btn-batch-dl").onclick = () => {
         const selected = getSelectedFiles();
         if (!selected) return;
@@ -616,7 +635,6 @@
         });
     };
 
-    // 下载封面
     document.getElementById("btn-download-cover").onclick = () => {
         if (!coverUrl) { alert("未找到封面图片！"); return; }
         downloadWithFolder(coverUrl, `cover.jpg`);
