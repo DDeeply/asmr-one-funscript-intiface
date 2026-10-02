@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         ASMR.one (Kikoeru) 全能音频批量下载器 (一键打包 ZIP 保持目录结构版)
 // @namespace    https://github.com/ykcjack/asmr-one-tools
-// @version      2.1.0
-// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包，解压后完美还原所有子文件夹，绝不混淆；fflate 流式极速压缩引擎，解决数百兆大文件卡死问题；内置实时进度条、树状目录折叠全选/反选与封面整合。
+// @version      2.2.0
+// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包，解压后完美还原所有子文件夹，绝不混淆；内置 fflate 流式极速压缩引擎与 320kbps WAV 转 MP3 自动压缩功能；内置实时进度条、树状目录折叠全选/反选与封面整合。
 // @author       ykcjack
 // @match        https://www.asmr.one/*
 // @match        https://asmr.one/*
 // @require      https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js
+// @require      https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_setClipboard
@@ -19,7 +20,7 @@
 (function() {
     'use strict';
 
-    console.log("[ASMR-Downloader] v2.1.0 一键 ZIP 目录压缩打包版 (fflate 流式极速引擎) 启动...");
+    console.log("[ASMR-Downloader] v2.2.0 一键 ZIP 目录压缩打包版 (fflate 流式 + WAV转MP3) 启动...");
 
     let currentWorkTitle = "ASMR作品";
     let currentRJ = "";
@@ -48,6 +49,151 @@
             };
             document.head.appendChild(s1);
         });
+    }
+
+    // --- 确保 lamejs MP3 编码库可用 ---
+    function ensureLamejs() {
+        return new Promise((resolve, reject) => {
+            if (typeof lamejs !== "undefined" && lamejs.Mp3Encoder) {
+                return resolve(window.lamejs || lamejs);
+            }
+            const s1 = document.createElement("script");
+            s1.src = "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js";
+            s1.onload = () => resolve(window.lamejs || lamejs);
+            s1.onerror = () => {
+                const s2 = document.createElement("script");
+                s2.src = "https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js";
+                s2.onload = () => resolve(window.lamejs || lamejs);
+                s2.onerror = () => reject(new Error("无法加载 lamejs 编码库，请检查网络连接！"));
+                document.head.appendChild(s2);
+            };
+            document.head.appendChild(s1);
+        });
+    }
+
+    // --- 极速解析 16-bit PCM WAV（0开销瞬间抽样） ---
+    function parseWavPCM(buffer) {
+        if (!buffer || buffer.byteLength < 44) return null;
+        const view = new DataView(buffer);
+        if (view.getUint32(0, false) !== 0x52494646 || view.getUint32(8, false) !== 0x57415645) {
+            return null; // 非 RIFF WAVE
+        }
+        let offset = 12;
+        let format = 0, channels = 0, sampleRate = 0, bitsPerSample = 0;
+        let dataOffset = 0, dataLength = 0;
+
+        while (offset < buffer.byteLength - 8) {
+            const chunkId = view.getUint32(offset, false);
+            const chunkSize = view.getUint32(offset + 4, true);
+            if (chunkId === 0x666d7420) { // 'fmt '
+                format = view.getUint16(offset + 8, true);
+                channels = view.getUint16(offset + 10, true);
+                sampleRate = view.getUint32(offset + 12, true);
+                bitsPerSample = view.getUint16(offset + 22, true);
+            } else if (chunkId === 0x64617461) { // 'data'
+                dataOffset = offset + 8;
+                dataLength = chunkSize;
+                break;
+            }
+            offset += 8 + chunkSize;
+        }
+
+        if (format === 1 && bitsPerSample === 16 && dataOffset > 0) {
+            const sampleCount = Math.floor(dataLength / (channels * 2));
+            const pcmData = new Int16Array(buffer, dataOffset, sampleCount * channels);
+            return { channels, sampleRate, sampleCount, pcmData };
+        }
+        return null;
+    }
+
+    // --- 核心：WAV 转 320kbps MP3 (双核自适应：极速原生解析 + WebAudio 回退) ---
+    async function convertWavToMp3(arrayBuffer, onProgress) {
+        const Lame = await ensureLamejs();
+
+        const parsed = parseWavPCM(arrayBuffer);
+        let channels, sampleRate, sampleCount, leftSamples, rightSamples;
+
+        if (parsed) {
+            channels = parsed.channels;
+            sampleRate = parsed.sampleRate;
+            sampleCount = parsed.sampleCount;
+            if (channels === 1) {
+                leftSamples = parsed.pcmData;
+                rightSamples = null;
+            } else {
+                leftSamples = new Int16Array(sampleCount);
+                rightSamples = new Int16Array(sampleCount);
+                for (let i = 0; i < sampleCount; i++) {
+                    leftSamples[i] = parsed.pcmData[i * 2];
+                    rightSamples[i] = parsed.pcmData[i * 2 + 1];
+                }
+            }
+        } else {
+            // 回退到 Web Audio API 解码非标准/24-bit WAV
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            let audioBuffer;
+            try {
+                audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+            } finally {
+                if (audioCtx.state !== 'closed') audioCtx.close().catch(() => {});
+            }
+            channels = Math.min(2, audioBuffer.numberOfChannels);
+            sampleRate = audioBuffer.sampleRate;
+            sampleCount = audioBuffer.length;
+            const lFloat = audioBuffer.getChannelData(0);
+            const rFloat = channels > 1 ? audioBuffer.getChannelData(1) : lFloat;
+
+            leftSamples = new Int16Array(sampleCount);
+            rightSamples = channels > 1 ? new Int16Array(sampleCount) : null;
+            for (let i = 0; i < sampleCount; i++) {
+                let s0 = lFloat[i];
+                leftSamples[i] = s0 < 0 ? s0 * 0x8000 : s0 * 0x7FFF;
+                if (channels > 1) {
+                    let s1 = rFloat[i];
+                    rightSamples[i] = s1 < 0 ? s1 * 0x8000 : s1 * 0x7FFF;
+                }
+            }
+        }
+
+        // 320kbps 极限高音质 MP3
+        const mp3encoder = new Lame.Mp3Encoder(channels, sampleRate, 320);
+        const mp3Chunks = [];
+        const blockSize = 11520;
+
+        for (let i = 0; i < sampleCount; i += blockSize) {
+            if (abortZipping) throw new Error("用户取消打包");
+            const len = Math.min(blockSize, sampleCount - i);
+            const leftChunk = leftSamples.subarray(i, i + len);
+            const rightChunk = rightSamples ? rightSamples.subarray(i, i + len) : null;
+
+            const mp3buf = rightChunk 
+                ? mp3encoder.encodeBuffer(leftChunk, rightChunk) 
+                : mp3encoder.encodeBuffer(leftChunk);
+
+            if (mp3buf && mp3buf.length > 0) {
+                mp3Chunks.push(mp3buf);
+            }
+
+            if (i % (blockSize * 4) === 0 || i + len >= sampleCount) {
+                const pct = Math.round(((i + len) / sampleCount) * 100);
+                if (onProgress) onProgress(pct);
+                await new Promise(r => setTimeout(r, 0)); // 避免浏览器主线程假死
+            }
+        }
+
+        const end = mp3encoder.flush();
+        if (end && end.length > 0) {
+            mp3Chunks.push(end);
+        }
+
+        const totalBytes = mp3Chunks.reduce((acc, c) => acc + c.length, 0);
+        const result = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of mp3Chunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
+        }
+        return result;
     }
 
     // --- 1. 创建 UI 容器 ---
@@ -91,6 +237,14 @@
             <button id="btn-zip-dl" style="background: linear-gradient(135deg, #7c4dff, #00b0ff); color: #fff; border: none; padding: 10px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; box-shadow: 0 4px 14px rgba(124,77,255,0.4); transition: filter 0.2s;">
                 <span>📦 一键打包下载 ZIP (保持完整层级结构)</span>
             </button>
+
+            <!-- WAV 自动转 MP3 智能选项 -->
+            <div style="background: rgba(124, 77, 255, 0.15); border: 1px solid rgba(124, 77, 255, 0.4); padding: 6px 10px; border-radius: 6px; display: flex; align-items: center; justify-content: space-between; font-size: 11px;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none;">
+                    <input type="checkbox" id="cb-convert-wav" checked style="cursor: pointer; accent-color: #00e5ff;">
+                    <span>🎵 遇到 WAV 自动转为高音质 MP3 <b style="color: #ffd700;">(320k 极省空间)</b></span>
+                </label>
+            </div>
 
             <!-- ZIP 打包实时进度条浮层 -->
             <div id="dl-zip-progress-box" style="display: none; background: rgba(124, 77, 255, 0.15); border: 1px solid #7c4dff; border-radius: 8px; padding: 10px; flex-direction: column; gap: 6px;">
@@ -145,6 +299,7 @@
     const dragHeader = document.getElementById("dl-drag-header");
     const cbSelectAll = document.getElementById("cb-select-all");
     const btnInvertSelect = document.getElementById("btn-invert-select");
+    const cbConvertWav = document.getElementById("cb-convert-wav");
     const zipProgressBox = document.getElementById("dl-zip-progress-box");
     const progressBar = document.getElementById("dl-progress-bar");
     const progressTitle = document.getElementById("dl-progress-title");
@@ -152,6 +307,14 @@
     const progressSize = document.getElementById("dl-progress-size");
     const btnZipCancel = document.getElementById("btn-zip-cancel");
     const manualContainer = document.getElementById("dl-manual-download-container");
+
+    const savedConvertWav = localStorage.getItem("asmr_dl_convert_wav");
+    if (savedConvertWav !== null) {
+        cbConvertWav.checked = (savedConvertWav === "true");
+    }
+    cbConvertWav.onchange = () => {
+        localStorage.setItem("asmr_dl_convert_wav", cbConvertWav.checked);
+    };
 
     toggleBtn.onclick = () => { modal.style.display = modal.style.display === "none" ? "flex" : "none"; };
     closeBtn.onclick = () => { modal.style.display = "none"; };
@@ -461,6 +624,7 @@
         const rootFolder = currentRJ || "ASMR";
         const safeTitle = currentWorkTitle.replace(/[\\/:*?"<>|]/g, "_").trim();
         const zipFileName = `${rootFolder}_${safeTitle.slice(0, 25)}.zip`;
+        const autoConvertWav = cbConvertWav ? cbConvertWav.checked : true;
 
         isZipping = true;
         abortZipping = false;
@@ -525,17 +689,35 @@
                 try {
                     // 获取二进制数据
                     const ab = await gmFetchArrayBuffer(item.url, token);
-                    downloadedBytes += ab.byteLength;
+                    let finalData = new Uint8Array(ab);
+                    let finalFullPath = item.fullPath;
+
+                    // 检测是否需要转码 WAV -> MP3 (320kbps 极限高音质)
+                    const isWav = /\.wav$/i.test(item.fullPath);
+                    if (autoConvertWav && isWav) {
+                        try {
+                            progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 转码中: ${item.title}...`;
+                            finalData = await convertWavToMp3(ab, (pct) => {
+                                progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 正在转为 MP3 (${pct}%): ${item.title}`;
+                            });
+                            finalFullPath = item.fullPath.replace(/\.wav$/i, ".mp3");
+                        } catch(convErr) {
+                            console.warn("[ZIP] WAV 转 MP3 失败，保留原始 WAV:", convErr);
+                            finalData = new Uint8Array(ab);
+                        }
+                    }
+
+                    downloadedBytes += finalData.byteLength;
                     downloadedCount++;
 
                     // 规范化文件相对路径，实时直接推入 ZIP 流中，完成后该 ArrayBuffer 可立即被 V8 释放
-                    const zipPath = `${rootFolder}/${item.fullPath}`;
-                    await pushToZipStream(zipPath, new Uint8Array(ab));
+                    const zipPath = `${rootFolder}/${finalFullPath}`;
+                    await pushToZipStream(zipPath, finalData);
 
                     const percent = Math.round((downloadedCount / selected.length) * 96);
                     progressBar.style.width = `${percent}%`;
                     progressSize.innerText = `${(downloadedBytes / (1024 * 1024)).toFixed(1)} MB`;
-                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 已写入 ZIP: ${item.title}`;
+                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 已写入 ZIP: ${finalFullPath.split('/').pop()}`;
                 } catch(err) {
                     console.error("[ZIP] 下载单文件失败:", item.fullPath, err);
                     downloadedCount++;
