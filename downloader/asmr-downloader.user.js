@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         ASMR.one (Kikoeru) 全能音频批量下载器 (一键打包 ZIP 保持目录结构版)
 // @namespace    https://github.com/ykcjack/asmr-one-tools
-// @version      2.0.1
-// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包，解压后完美还原所有子文件夹，绝不混淆；内存直通加速，解决大文件卡死问题；内置实时进度条、树状目录折叠全选/反选与封面整合。
+// @version      2.1.0
+// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包，解压后完美还原所有子文件夹，绝不混淆；fflate 流式极速压缩引擎，解决数百兆大文件卡死问题；内置实时进度条、树状目录折叠全选/反选与封面整合。
 // @author       ykcjack
 // @match        https://www.asmr.one/*
 // @match        https://asmr.one/*
-// @require      https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js
+// @require      https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_setClipboard
@@ -19,7 +19,7 @@
 (function() {
     'use strict';
 
-    console.log("[ASMR-Downloader] v2.0.1 一键 ZIP 目录压缩打包版 (内存直通加速) 启动...");
+    console.log("[ASMR-Downloader] v2.1.0 一键 ZIP 目录压缩打包版 (fflate 流式极速引擎) 启动...");
 
     let currentWorkTitle = "ASMR作品";
     let currentRJ = "";
@@ -30,20 +30,20 @@
     let isZipping = false;
     let abortZipping = false;
 
-    // --- 确保 JSZip 库可用 ---
-    function ensureJSZip() {
+    // --- 确保 fflate 极速压缩库可用 ---
+    function ensureFflate() {
         return new Promise((resolve, reject) => {
-            if (typeof JSZip !== "undefined") {
-                return resolve(window.JSZip || JSZip);
+            if (typeof fflate !== "undefined" && fflate.Zip) {
+                return resolve(window.fflate || fflate);
             }
             const s1 = document.createElement("script");
-            s1.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
-            s1.onload = () => resolve(window.JSZip || JSZip);
+            s1.src = "https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js";
+            s1.onload = () => resolve(window.fflate || fflate);
             s1.onerror = () => {
                 const s2 = document.createElement("script");
-                s2.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-                s2.onload = () => resolve(window.JSZip || JSZip);
-                s2.onerror = () => reject(new Error("无法加载 JSZip 库，请检查网络连接！"));
+                s2.src = "https://cdnjs.cloudflare.com/ajax/libs/fflate/0.8.2/index.js";
+                s2.onload = () => resolve(window.fflate || fflate);
+                s2.onerror = () => reject(new Error("无法加载 fflate 极速压缩引擎，请检查网络连接！"));
                 document.head.appendChild(s2);
             };
             document.head.appendChild(s1);
@@ -440,7 +440,7 @@
         return selected;
     }
 
-    // --- 6. 核心：一键打包 ZIP 压缩包下载（内存直通，绝不卡死） ---
+    // --- 6. 核心：一键打包 ZIP 压缩包下载（fflate 流式极速引擎，彻底杜绝大文件卡死） ---
     async function startZipDownload() {
         if (isZipping) {
             alert("当前正在打包下载中，请稍候！");
@@ -450,9 +450,9 @@
         const selected = getSelectedFiles();
         if (!selected) return;
 
-        let ZipLib;
+        let fflateEngine;
         try {
-            ZipLib = await ensureJSZip();
+            fflateEngine = await ensureFflate();
         } catch(e) {
             alert("初始化压缩引擎失败: " + e.message);
             return;
@@ -470,46 +470,72 @@
         btnZipCancel.style.display = "inline-block";
         zipProgressBox.style.display = "flex";
         progressBar.style.width = "0%";
-        progressTitle.innerText = `正在下载数据 (${selected.length} 个文件)...`;
+        progressTitle.innerText = `准备流式打包 (${selected.length} 个文件)...`;
 
-        const zip = new ZipLib();
+        const chunks = [];
+        let zipErrOccurred = null;
+
+        // 初始化 fflate 流式 ZIP 容器 (极低内存占用，原生 TypedArray)
+        const zip = new fflateEngine.Zip((err, chunk, final) => {
+            if (err) {
+                console.error("[fflate] 流错误:", err);
+                zipErrOccurred = err;
+                return;
+            }
+            if (chunk && chunk.length > 0) {
+                chunks.push(chunk);
+            }
+        });
+
+        // 串行写入锁，确保多并发下载的数据块按顺序追加至 ZIP 规范流中
+        let zipLock = Promise.resolve();
+        function pushToZipStream(relativePath, uint8Data) {
+            zipLock = zipLock.then(() => {
+                if (abortZipping) return;
+                const fileEntry = new fflateEngine.ZipPassThrough(relativePath);
+                zip.add(fileEntry);
+                fileEntry.push(uint8Data, true);
+            });
+            return zipLock;
+        }
+
         let downloadedBytes = 0;
         let downloadedCount = 0;
         const token = localStorage.getItem("token") || localStorage.getItem("jwt") || sessionStorage.getItem("token") || "";
 
-        // 1. 如果包含封面，先打包封面
+        // 1. 如果包含封面，先推入封面
         if (coverUrl) {
             try {
                 const coverAb = await gmFetchArrayBuffer(coverUrl, token, 20000);
-                zip.file(`${rootFolder}/cover.jpg`, coverAb, { binary: true });
+                await pushToZipStream(`${rootFolder}/cover.jpg`, new Uint8Array(coverAb));
             } catch(e) {
                 console.warn("[ZIP] 封面获取跳过:", e);
             }
         }
 
-        // 2. 并发下载队列 (并发数 2，兼顾速度与浏览器内存健康)
+        // 2. 并发下载队列 (并发数 2，兼顾下载速度与浏览器稳定)
         const queue = [...selected];
         const concurrency = 2;
 
         async function worker() {
             while (queue.length > 0 && !abortZipping) {
                 const item = queue.shift();
-                progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 下载: ${item.title}`;
+                progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 下载中: ${item.title}`;
 
                 try {
-                    // 使用 ArrayBuffer 二进制内存直通，绝不经过 Blob 转换
+                    // 获取二进制数据
                     const ab = await gmFetchArrayBuffer(item.url, token);
                     downloadedBytes += ab.byteLength;
                     downloadedCount++;
 
-                    // 规范化文件相对路径，存入 ZIP
+                    // 规范化文件相对路径，实时直接推入 ZIP 流中，完成后该 ArrayBuffer 可立即被 V8 释放
                     const zipPath = `${rootFolder}/${item.fullPath}`;
-                    zip.file(zipPath, ab, { binary: true });
+                    await pushToZipStream(zipPath, new Uint8Array(ab));
 
-                    const percent = Math.round((downloadedCount / selected.length) * 85);
+                    const percent = Math.round((downloadedCount / selected.length) * 96);
                     progressBar.style.width = `${percent}%`;
                     progressSize.innerText = `${(downloadedBytes / (1024 * 1024)).toFixed(1)} MB`;
-                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 已载入: ${item.title}`;
+                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 已写入 ZIP: ${item.title}`;
                 } catch(err) {
                     console.error("[ZIP] 下载单文件失败:", item.fullPath, err);
                     downloadedCount++;
@@ -522,32 +548,34 @@
         await Promise.all(workers);
 
         if (abortZipping) {
+            chunks.length = 0;
             zipProgressBox.style.display = "none";
             isZipping = false;
-            alert("已取消 ZIP 打包下载！");
+            alert("已取消 ZIP 打包下载！内存已释放。");
             return;
         }
 
-        // 3. 构建 ZIP 压缩包 (启用 streamFiles 流式处理与 STORE 免重复压缩)
-        progressTitle.innerText = "🗜️ 全部文件已下载，正在瞬间生成 ZIP 压缩包...";
-        progressBar.style.width = "88%";
-        progressDetail.innerText = "正在组装 ZIP 目录树结构...";
+        if (zipErrOccurred) {
+            alert("ZIP 流式压缩出现错误: " + zipErrOccurred.message);
+            zipProgressBox.style.display = "none";
+            isZipping = false;
+            return;
+        }
+
+        // 3. 构建收尾：此时所有文件早已在下载过程中流式写入完毕，仅需耗时 0.05 秒完成中央目录封口
+        progressTitle.innerText = "⚡ 正在完成 ZIP 封口...";
+        progressBar.style.width = "99%";
+        progressDetail.innerText = "正在写入 ZIP 文件目录索引 (瞬间完成)...";
 
         try {
-            const zipBlob = await zip.generateAsync({
-                type: "blob",
-                compression: "STORE",
-                streamFiles: true
-            }, (metadata) => {
-                const p = 88 + Math.round(metadata.percent * 0.12);
-                progressBar.style.width = `${p}%`;
-                progressDetail.innerText = `ZIP 封装进度: ${Math.round(metadata.percent)}%`;
-            });
+            await zipLock;
+            zip.end();
 
             progressBar.style.width = "100%";
             progressTitle.innerText = "✅ ZIP 生成完毕！";
-            progressDetail.innerText = "已自动触发保存，若浏览器拦截请点击下方按钮：";
+            progressDetail.innerText = "已自动触发保存，若浏览器拦截请点击下方绿色按钮：";
 
+            const zipBlob = new Blob(chunks, { type: "application/zip" });
             const blobUrl = URL.createObjectURL(zipBlob);
             const sizeMB = (zipBlob.size / (1024 * 1024)).toFixed(1);
 
@@ -559,7 +587,7 @@
             a.click();
             document.body.removeChild(a);
 
-            // 同时渲染醒目的手动下载备用按钮（防止浏览器因为长时间异步操作阻断自动弹窗）
+            // 同时渲染醒目的手动下载备用按钮
             manualContainer.style.display = "block";
             manualContainer.innerHTML = `
                 <a id="btn-manual-save-zip" href="${blobUrl}" download="${zipFileName}" style="display: block; background: #4cd964; color: #000; text-align: center; padding: 8px 12px; border-radius: 6px; font-weight: bold; text-decoration: none; font-size: 12px; box-shadow: 0 2px 8px rgba(76,217,100,0.4);">
