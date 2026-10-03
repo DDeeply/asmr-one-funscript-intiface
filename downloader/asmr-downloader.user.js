@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ASMR.one (Kikoeru) 全能音频批量下载器 (一键打包 ZIP 保持目录结构版)
 // @namespace    https://github.com/ykcjack/asmr-one-tools
-// @version      2.3.0
-// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包；内置智能直取官方 CDN 高品质预压缩音频流（体积直降90%，0秒转码秒下），支持 fflate 流式极速压缩封口；内置实时进度条、树状目录折叠全选/反选与封面整合。
+// @version      2.3.1
+// @description  完整保持 ASMR.one 原始文件夹层级结构，一键打包下载全部或勾选音频为标准 ZIP 压缩包；内置智能直取官方 CDN 高品质预压缩音频流（0秒转码秒下），支持 fflate 流式极速压缩封口；全新加入硬超时智能跳过与一键“跳过封包”功能，彻底根治最后单文件卡顿假死问题。
 // @author       ykcjack
 // @match        https://www.asmr.one/*
 // @match        https://asmr.one/*
@@ -20,7 +20,7 @@
 (function() {
     'use strict';
 
-    console.log("[ASMR-Downloader] v2.3.0 一键 ZIP 目录压缩打包版 (CDN极速压缩流 + fflate) 启动...");
+    console.log("[ASMR-Downloader] v2.3.1 一键 ZIP 目录压缩打包版 (防卡死硬超时+跳过封包) 启动...");
 
     let currentWorkTitle = "ASMR作品";
     let currentRJ = "";
@@ -30,6 +30,7 @@
     let isFetching = false;
     let isZipping = false;
     let abortZipping = false;
+    let skipZipping = false;
 
     // --- 确保 fflate 极速压缩库可用 ---
     function ensureFflate() {
@@ -250,7 +251,10 @@
             <div id="dl-zip-progress-box" style="display: none; background: rgba(124, 77, 255, 0.15); border: 1px solid #7c4dff; border-radius: 8px; padding: 10px; flex-direction: column; gap: 6px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <b id="dl-progress-title" style="color: #00e5ff; font-size: 11px;">准备下载...</b>
-                    <button id="btn-zip-cancel" style="background: #ff5252; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px;">✕ 取消</button>
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <button id="btn-zip-skip" style="background: #ff9800; color: #fff; border: none; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 10px; font-weight: bold;" title="跳过当前卡住的文件，直接打包已下载好的内容">⏭️ 跳过并打包</button>
+                        <button id="btn-zip-cancel" style="background: #ff5252; color: #fff; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px;">✕ 取消</button>
+                    </div>
                 </div>
                 <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
                     <div id="dl-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #7c4dff, #00e5ff); transition: width 0.2s;"></div>
@@ -305,6 +309,7 @@
     const progressTitle = document.getElementById("dl-progress-title");
     const progressDetail = document.getElementById("dl-progress-detail");
     const progressSize = document.getElementById("dl-progress-size");
+    const btnZipSkip = document.getElementById("btn-zip-skip");
     const btnZipCancel = document.getElementById("btn-zip-cancel");
     const manualContainer = document.getElementById("dl-manual-download-container");
 
@@ -314,6 +319,12 @@
     }
     cbConvertWav.onchange = () => {
         localStorage.setItem("asmr_dl_convert_wav", cbConvertWav.checked);
+    };
+
+    btnZipSkip.onclick = () => {
+        if (!isZipping) return;
+        skipZipping = true;
+        progressTitle.innerText = "⚡ 正在跳过卡顿文件，立即封装已下载内容...";
     };
 
     toggleBtn.onclick = () => { modal.style.display = modal.style.display === "none" ? "flex" : "none"; };
@@ -512,27 +523,64 @@
         });
     }
 
-    function gmFetchArrayBuffer(url, token = "", timeoutMs = 60000) {
+    function gmFetchArrayBuffer(url, token = "", timeoutMs = 25000, onProgress = null) {
         return new Promise((resolve, reject) => {
+            if (!url) return reject(new Error("下载地址为空"));
             const headers = {};
             if (token) headers["Authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
 
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: url,
-                headers: headers,
-                responseType: "arraybuffer",
-                timeout: timeoutMs,
-                onload: (res) => {
-                    if (res.status >= 200 && res.status < 300) {
-                        resolve(res.response);
-                    } else {
-                        reject(new Error(`HTTP ${res.status}`));
+            let timer = null;
+            let req = null;
+            let isDone = false;
+
+            const cleanup = () => {
+                isDone = true;
+                if (timer) { clearTimeout(timer); timer = null; }
+            };
+
+            // 原生 JavaScript 绝对看门狗定时器 (25秒强行断开并抛错，彻底杜绝网络假死)
+            timer = setTimeout(() => {
+                if (!isDone) {
+                    cleanup();
+                    try { if (req && req.abort) req.abort(); } catch(e) {}
+                    reject(new Error(`网络请求超时 (${Math.round(timeoutMs/1000)}s)`));
+                }
+            }, timeoutMs);
+
+            try {
+                req = GM_xmlhttpRequest({
+                    method: "GET",
+                    url: url,
+                    headers: headers,
+                    responseType: "arraybuffer",
+                    timeout: timeoutMs,
+                    onprogress: (p) => {
+                        if (!isDone && onProgress) onProgress(p);
+                    },
+                    onload: (res) => {
+                        if (isDone) return;
+                        cleanup();
+                        if (res.status >= 200 && res.status < 300) {
+                            resolve(res.response);
+                        } else {
+                            reject(new Error(`HTTP ${res.status}`));
+                        }
+                    },
+                    onerror: (err) => {
+                        if (isDone) return;
+                        cleanup();
+                        reject(err);
+                    },
+                    ontimeout: () => {
+                        if (isDone) return;
+                        cleanup();
+                        reject(new Error(`网络请求超时 (${Math.round(timeoutMs/1000)}s)`));
                     }
-                },
-                onerror: (err) => reject(err),
-                ontimeout: () => reject(new Error("下载单曲超时 (60s)"))
-            });
+                });
+            } catch(e) {
+                cleanup();
+                reject(e);
+            }
         });
     }
 
@@ -633,6 +681,7 @@
         manualContainer.style.display = "none";
         manualContainer.innerHTML = "";
         btnZipCancel.style.display = "inline-block";
+        btnZipSkip.style.display = "inline-block";
         zipProgressBox.style.display = "flex";
         progressBar.style.width = "0%";
         progressTitle.innerText = `准备流式打包 (${selected.length} 个文件)...`;
@@ -683,9 +732,9 @@
         const concurrency = 2;
 
         async function worker() {
-            while (queue.length > 0 && !abortZipping) {
+            while (queue.length > 0 && !abortZipping && !skipZipping) {
                 const item = queue.shift();
-                progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 下载中: ${item.title}`;
+                progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 连接中: ${item.title}`;
 
                 try {
                     let fetchUrl = item.url;
@@ -693,16 +742,52 @@
                     const isWav = /\.wav$/i.test(item.fullPath);
                     let usedCdnStream = false;
 
-                    // 1. 核心提速突破：若开启压缩且服务端已预转码为高品质 AAC/M4A 流（Cloudflare CDN 毫秒级直达，体积直降 90%）
+                    // 1. 核心提速突破：若开启压缩且服务端已预转码为高品质 AAC/M4A 流
                     if (autoConvertWav && isWav && item.streamLowQualityUrl) {
                         fetchUrl = item.streamLowQualityUrl;
                         finalFullPath = item.fullPath.replace(/\.wav$/i, ".m4a");
                         usedCdnStream = true;
-                        progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 极速直取官方高品质压缩音频: ${item.title}...`;
                     }
 
-                    // 获取二进制数据（若走预转码 CDN 流，70MB 变 7MB，0.3 秒下载完毕）
-                    const ab = await gmFetchArrayBuffer(fetchUrl, token);
+                    let ab = null;
+                    let fetchSuccess = false;
+
+                    // 最多尝试 2 次下载，带 25 秒原生 JS 看门狗定时器与传输字节更新
+                    for (let attempt = 1; attempt <= 2 && !abortZipping && !skipZipping; attempt++) {
+                        try {
+                            ab = await gmFetchArrayBuffer(fetchUrl, token, 25000, (p) => {
+                                if (p.loaded && p.total && !skipZipping) {
+                                    const curMB = (p.loaded / (1024 * 1024)).toFixed(1);
+                                    const totMB = (p.total / (1024 * 1024)).toFixed(1);
+                                    progressDetail.innerText = `[${downloadedCount + 1}/${selected.length}] 传输中: ${item.title} (${curMB}/${totMB} MB)`;
+                                }
+                            });
+                            fetchSuccess = true;
+                            break;
+                        } catch(fetchErr) {
+                            console.warn(`[ZIP] 第 ${attempt} 次下载失败: ${item.title}`, fetchErr.message);
+                            if (attempt === 1 && usedCdnStream) {
+                                // 容错切换：CDN 流失败则切回原始源站
+                                fetchUrl = item.url;
+                                finalFullPath = item.fullPath;
+                                usedCdnStream = false;
+                            }
+                            await new Promise(r => setTimeout(r, 600));
+                        }
+                    }
+
+                    if (skipZipping || abortZipping) {
+                        if (skipZipping) queue.length = 0; // 彻底清空剩余队列
+                        break;
+                    }
+
+                    if (!fetchSuccess || !ab) {
+                        downloadedCount++;
+                        console.warn("[ZIP] 文件连接超时，已自动安全跳过:", item.title);
+                        progressDetail.innerText = `[${downloadedCount}/${selected.length}] 超时跳过: ${item.title}`;
+                        continue;
+                    }
+
                     let finalData = new Uint8Array(ab);
 
                     // 2. 备用保障：极少数情况下若服务端没有提供预压缩流且用户勾选了压缩，才在前端执行转码
@@ -731,9 +816,9 @@
                     progressSize.innerText = `${(downloadedBytes / (1024 * 1024)).toFixed(1)} MB`;
                     progressDetail.innerText = `[${downloadedCount}/${selected.length}] 已写入 ZIP: ${finalFullPath.split('/').pop()}`;
                 } catch(err) {
-                    console.error("[ZIP] 下载单文件失败:", item.fullPath, err);
+                    console.error("[ZIP] 下载单文件异常:", item.fullPath, err);
                     downloadedCount++;
-                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 下载跳过: ${item.title}`;
+                    progressDetail.innerText = `[${downloadedCount}/${selected.length}] 异常跳过: ${item.title}`;
                 }
             }
         }
@@ -744,7 +829,9 @@
         if (abortZipping) {
             chunks.length = 0;
             zipProgressBox.style.display = "none";
+            btnZipSkip.style.display = "none";
             isZipping = false;
+            skipZipping = false;
             alert("已取消 ZIP 打包下载！内存已释放。");
             return;
         }
@@ -752,14 +839,16 @@
         if (zipErrOccurred) {
             alert("ZIP 流式压缩出现错误: " + zipErrOccurred.message);
             zipProgressBox.style.display = "none";
+            btnZipSkip.style.display = "none";
             isZipping = false;
+            skipZipping = false;
             return;
         }
 
         // 3. 构建收尾：此时所有文件早已在下载过程中流式写入完毕，仅需耗时 0.05 秒完成中央目录封口
         progressTitle.innerText = "⚡ 正在完成 ZIP 封口...";
         progressBar.style.width = "99%";
-        progressDetail.innerText = "正在写入 ZIP 文件目录索引 (瞬间完成)...";
+        progressDetail.innerText = `正在写入 ZIP 目录索引 (已打包 ${downloadedCount} 个文件)...`;
 
         try {
             await zipLock;
@@ -790,13 +879,17 @@
             `;
 
             btnZipCancel.style.display = "none";
+            btnZipSkip.style.display = "none";
             isZipping = false;
+            skipZipping = false;
 
         } catch(zipErr) {
             console.error("生成 ZIP 失败:", zipErr);
             alert("生成 ZIP 失败: " + zipErr.message);
             zipProgressBox.style.display = "none";
+            btnZipSkip.style.display = "none";
             isZipping = false;
+            skipZipping = false;
         }
     }
 
